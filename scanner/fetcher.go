@@ -90,14 +90,14 @@ type fetchRange struct {
 // taking configuration options from opts.
 func NewFetcher(client *client.LogClient, opts *FetcherOptions) *Fetcher {
 	cancel := func() {} // Protect against calling Stop before Run.
-	bo = &workerBackoff.Backoff{
+	workerBackoff := &backoff.Backoff{
 		Min:    1 * time.Second,
 		Max:    30 * time.Second,
 		Factor: 2,
 		Jitter: true,
 	}
 
-	return &Fetcher{client: client, opts: opts, cancel: cancel, workerBackoff: bo}
+	return &Fetcher{client: client, opts: opts, cancel: cancel, workerBackoff: workerBackoff}
 }
 
 // Prepare caches the latest Log's STH if not present and returns it. It also
@@ -267,6 +267,7 @@ func (f *Fetcher) runWorker(ctx context.Context, ranges <-chan fetchRange, fn fu
 				}
 				fn(EntryBatch{Start: r.start, Entries: resp.Entries})
 				r.start += int64(len(resp.Entries))
+				return nil
 			})
 			if err != nil {
 				glog.Warningf("Worker context closed: %v", err)
