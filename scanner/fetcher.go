@@ -66,6 +66,9 @@ type Fetcher struct {
 	// The STH retrieval backoff state. Used only in Continuous fetch mode.
 	sthBackoff *backoff.Backoff
 
+	// backoff state for the worker.
+	workerBackoff *backoff.Backoff
+
 	// Stops range generator, which causes the Fetcher to terminate gracefully.
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -87,7 +90,14 @@ type fetchRange struct {
 // taking configuration options from opts.
 func NewFetcher(client *client.LogClient, opts *FetcherOptions) *Fetcher {
 	cancel := func() {} // Protect against calling Stop before Run.
-	return &Fetcher{client: client, opts: opts, cancel: cancel}
+	bo = &workerBackoff.Backoff{
+		Min:    1 * time.Second,
+		Max:    30 * time.Second,
+		Factor: 2,
+		Jitter: true,
+	}
+
+	return &Fetcher{client: client, opts: opts, cancel: cancel, workerBackoff: bo}
 }
 
 // Prepare caches the latest Log's STH if not present and returns it. It also
@@ -250,19 +260,18 @@ func (f *Fetcher) runWorker(ctx context.Context, ranges <-chan fetchRange, fn fu
 		// Logs MAY return fewer than the number of leaves requested. Only complete
 		// if we actually got all the leaves we were expecting.
 		for r.start <= r.end {
-			// Fetcher.Run() can be cancelled while we are looping over this job.
-			if err := ctx.Err(); err != nil {
+			err := f.workerBackoff.Retry(ctx, func() error {
+				resp, err := f.client.GetRawEntries(ctx, r.start, r.end)
+				if err != nil {
+					return err
+				}
+				fn(EntryBatch{Start: r.start, Entries: resp.Entries})
+				r.start += int64(len(resp.Entries))
+			})
+			if err != nil {
 				glog.Warningf("Worker context closed: %v", err)
 				return
 			}
-			resp, err := f.client.GetRawEntries(ctx, r.start, r.end)
-			if err != nil {
-				glog.Errorf("GetRawEntries() failed: %v", err)
-				// TODO(pavelkalinnikov): Introduce backoff policy and pause here.
-				continue
-			}
-			fn(EntryBatch{Start: r.start, Entries: resp.Entries})
-			r.start += int64(len(resp.Entries))
 		}
 	}
 }
